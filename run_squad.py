@@ -713,6 +713,8 @@ def main():
                         help="SQuAD json for predictions. E.g., dev-v1.1.json or test-v1.1.json")
     parser.add_argument("--init_checkpoint", default=None, type=str,
                         help="Initial checkpoint (usually from a pre-trained BERT model).")
+    parser.add_argument("--load_checkpoint", default=None, type=str,
+                        help="Load checkpoint from previous SQuAD-trained model.")
     parser.add_argument("--do_lower_case", default=True, action='store_true',
                         help="Whether to lower case the input text. Should be True for uncased "
                              "models and False for cased models.")
@@ -840,7 +842,9 @@ def main():
 
     # Prepare model
     model = BertForQuestionAnswering(bert_config)
-    if args.init_checkpoint is not None:
+    if args.load_checkpoint is not None:
+        model.load_state_dict(torch.load(args.load_checkpoint, map_location='cpu'))
+    elif args.init_checkpoint is not None:
         model.bert.load_state_dict(torch.load(args.init_checkpoint, map_location='cpu'))
     if args.fp16:
         model.half()
@@ -931,7 +935,12 @@ def main():
                         optimizer.step()
                     model.zero_grad()
                     global_step += 1
-
+                if (global_step + 1) % args.save_checkpoints_steps == 0:
+                    torch.save(model.state_dict(), os.path.join(
+                        args.output_dir, 'model_iter_%d.pth' % (global_step + 1)))
+        final_filename = 'model_iter_%d.pth' % (global_step + 1)
+        torch.save(model.state_dict(), os.path.join(args.output_dir, final_filename))
+        os.symlink(final_filename, os.path.join(args.output_dir, 'model_final.pth'))
     if args.do_predict:
         eval_examples = read_squad_examples(
             input_file=args.predict_file, is_training=False)
