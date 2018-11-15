@@ -8,7 +8,7 @@ size="$1"
 case="$2"
 params_tf="bert-${size}-${case}-tf"
 params_torch="bert-${size}-${case}-torch"
-train_cmd='python3.6 bert-code/run_squad.py --vocab_file bert/vocab.txt --bert_config_file bert/bert_config.json --init_checkpoint bert-torch/pytorch_model.bin --do_train --do_predict --do_lower_case --train_file train-v1.1.json --predict_file dev-v1.1.json --learning_rate 3e-5 --num_train_epochs 2 --max_seq_length 384 --doc_stride 128 --save_checkpoints_steps 0 --output_dir out'
+train_cmd='python3.6 bert-code/run_squad.py --vocab_file bert/vocab.txt --bert_config_file bert/bert_config.json --init_checkpoint bert-torch/pytorch_model.bin --do_train --do_predict --do_lower_case --train_file train-v1.1.json --predict_file dev-v1.1.json --learning_rate 3e-5 --num_train_epochs 2 --max_seq_length 384 --doc_stride 128 --save_checkpoints_steps 100000 --output_dir out'
 eval_cmd='python evaluate-v1.1.py dev-v1.1.json out/predictions.json > eval.json'
 if [ "$size" = "large" ]
 then
