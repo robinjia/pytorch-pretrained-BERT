@@ -26,6 +26,8 @@ import math
 import os
 import random
 import six
+import sys
+import tempfile
 from tqdm import tqdm, trange
 
 import numpy as np
@@ -728,6 +730,9 @@ def main():
                              "be truncated to this length.")
     parser.add_argument("--do_train", default=False, action='store_true', help="Whether to run training.")
     parser.add_argument("--do_predict", default=False, action='store_true', help="Whether to run eval on the dev set.")
+    parser.add_argument("--run_server", default=False, action='store_true', help="Whether to start a server.")
+    parser.add_argument("--server_port", default=7200, type=int, help="Server port.")
+    parser.add_argument("--server_config_file", default='server_squad.yaml', help='Server config.')
     parser.add_argument("--train_batch_size", default=32, type=int, help="Total batch size for training.")
     parser.add_argument("--predict_batch_size", default=8, type=int, help="Total batch size for predictions.")
     parser.add_argument("--learning_rate", default=5e-5, type=float, help="The initial learning rate for Adam.")
@@ -805,8 +810,8 @@ def main():
     if n_gpu > 0:
         torch.cuda.manual_seed_all(args.seed)
 
-    if not args.do_train and not args.do_predict:
-        raise ValueError("At least one of `do_train` or `do_predict` must be True.")
+    #if not args.do_train and not args.do_predict:
+    #    raise ValueError("At least one of `do_train` or `do_predict` must be True.")
 
     if args.do_train:
         if not args.train_file:
@@ -993,7 +998,59 @@ def main():
                           args.n_best_size, args.max_answer_length,
                           args.do_lower_case, output_prediction_file,
                           output_nbest_file, args.verbose_logging)
+    if args.run_server:
+        ROOT_DIR = os.path.dirname(os.path.abspath(__file__))
+        SERVER_ID = '<server_id>'
+        sys.path.insert(0, ROOT_DIR)
+        from morse import Morse
+        model.eval()
+        def query_func(paragraph, question, beam_size):
+            data_obj = {
+                'data': [{
+                    'paragraphs': [{
+                        'context': paragraph, 
+                        'qas': [{'question': question, 'id': SERVER_ID}]
+                    }]
+                }]
+            }
+            with tempfile.NamedTemporaryFile('w', suffix='.json') as data_f:
+                data_f.write(json.dumps(data_obj))
+                data_f.seek(0)
+                query_examples = read_squad_examples(
+                    input_file=data_f.name, is_training=False)
+            query_features = convert_examples_to_features(
+                examples=query_examples,
+                tokenizer=tokenizer,
+                max_seq_length=args.max_seq_length,
+                doc_stride=args.doc_stride,
+                max_query_length=args.max_query_length,
+                is_training=False)
+            input_ids = torch.tensor([f.input_ids for f in query_features], dtype=torch.long).to(device)
+            input_mask = torch.tensor([f.input_mask for f in query_features], dtype=torch.long).to(device)
+            segment_ids = torch.tensor([f.segment_ids for f in query_features], dtype=torch.long).to(device)
+            with torch.no_grad():
+                batch_start_logits, batch_end_logits = model(input_ids, segment_ids, input_mask)
+            all_results = []
+            for i in range(len(query_features)):
+                start_logits = batch_start_logits[i].detach().cpu().tolist()
+                end_logits = batch_end_logits[i].detach().cpu().tolist()
+                query_feature = query_features[i]
+                unique_id = int(query_feature.unique_id)
+                all_results.append(RawResult(unique_id=unique_id,
+                                             start_logits=start_logits,
+                                             end_logits=end_logits))
+            with tempfile.NamedTemporaryFile('r+', suffix='.json') as nbest_f:
+                with tempfile.NamedTemporaryFile('w', suffix='.json') as pred_f:
+                    write_predictions(query_examples, query_features, all_results,
+                                      beam_size, args.max_answer_length,
+                                      args.do_lower_case, pred_f.name,
+                                      nbest_f.name, args.verbose_logging)
+                nbest_f.seek(0)
+                nbest_list = json.loads(nbest_f.read())[SERVER_ID]
+            return {'beam': nbest_list}
 
+        app = Morse(query_func, args.server_config_file)
+        app.serve(port=args.server_port)
 
 if __name__ == "__main__":
     main()
