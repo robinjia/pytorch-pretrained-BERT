@@ -14,16 +14,26 @@ inputs:
   - name: beam_size
     display: Beam size
     type: integer
-    default: 1
+    default: 10
     bootstrap-cols: 3
 outputs:
   - name: beam
     display: "Model predictions:"
     type: list
     fields:
-    - name: text
-      display: Answer
-      type: string
-    - name: probability
-      display: Probability
-      type: float
+      - name: text
+        display: Answer
+        type: string
+      - name: probability
+        display: Probability
+        type: float
+  - name: grad_norms
+    display: "Gradient L2 Norms"
+    type: list
+    fields:
+      - name: token
+        display: Token
+        type: string
+      - name: grad_norm
+        display: Gradient L2 norm
+        type: float
