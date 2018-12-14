@@ -14,12 +14,17 @@ from pathlib import Path
 from typing import Optional, Tuple, Union, IO, Callable, Set
 from hashlib import sha256
 from functools import wraps
+import sys
 
 from tqdm import tqdm
 
-import boto3
-from botocore.exceptions import ClientError
 import requests
+try:
+    import boto3
+    from botocore.exceptions import ClientError
+except ImportError as e:
+    print('Warning: boto not installed', file=sys.stderr)
+    pass
 
 logger = logging.getLogger(__name__)  # pylint: disable=invalid-name
 
@@ -172,10 +177,13 @@ def get_from_cache(url: str, cache_dir: Union[str, Path] = None) -> str:
     if isinstance(cache_dir, Path):
         cache_dir = str(cache_dir)
 
-    os.makedirs(cache_dir, exist_ok=True)
+    if not os.path.exists:
+        os.makedirs(cache_dir)
 
     # Get eTag to add to filename, if it exists.
-    if url.startswith("s3://"):
+    if os.getenv('NO_ETAG'):
+        etag = None
+    elif url.startswith("s3://"):
         etag = s3_etag(url)
     else:
         response = requests.head(url, allow_redirects=True)

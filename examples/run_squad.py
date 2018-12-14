@@ -25,8 +25,11 @@ import logging
 import json
 import math
 import os
-import random
 import pickle
+import random
+import six
+import sys
+import tempfile
 from tqdm import tqdm, trange
 
 import numpy as np
@@ -44,7 +47,8 @@ try:
     from apex.optimizers import FusedAdam
     from apex.parallel import DistributedDataParallel as DDP
 except ImportError:
-    raise ImportError("Please install apex from https://www.github.com/nvidia/apex to run this.")
+    pass
+    #raise ImportError("Please install apex from https://www.github.com/nvidia/apex to run this.")
 
 logging.basicConfig(format = '%(asctime)s - %(levelname)s - %(name)s -   %(message)s',
                     datefmt = '%m/%d/%Y %H:%M:%S',
@@ -700,9 +704,6 @@ def main():
                         help="Initial checkpoint (usually from a pre-trained BERT model).")
     parser.add_argument("--load_checkpoint", default=None, type=str,
                         help="Load checkpoint from previous SQuAD-trained model.")
-    parser.add_argument("--do_lower_case", default=True, action='store_true',
-                        help="Whether to lower case the input text. Should be True for uncased "
-                             "models and False for cased models.")
     parser.add_argument("--max_seq_length", default=384, type=int,
                         help="The maximum total input sequence length after WordPiece tokenization. Sequences "
                              "longer than this will be truncated, and sequences shorter than this will be padded.")
@@ -713,6 +714,10 @@ def main():
                              "be truncated to this length.")
     parser.add_argument("--do_train", default=False, action='store_true', help="Whether to run training.")
     parser.add_argument("--do_predict", default=False, action='store_true', help="Whether to run eval on the dev set.")
+    parser.add_argument("--test_gradients", default=False, action='store_true', help="Whether to run the gradient investigation code.")
+    parser.add_argument("--run_server", default=False, action='store_true', help="Whether to start a server.")
+    parser.add_argument("--server_port", default=7200, type=int, help="Server port.")
+    parser.add_argument("--server_config_file", default='server_squad.yaml', help='Server config.')
     parser.add_argument("--train_batch_size", default=32, type=int, help="Total batch size for training.")
     parser.add_argument("--predict_batch_size", default=8, type=int, help="Total batch size for predictions.")
     parser.add_argument("--learning_rate", default=5e-5, type=float, help="The initial learning rate for Adam.")
@@ -786,8 +791,8 @@ def main():
     if n_gpu > 0:
         torch.cuda.manual_seed_all(args.seed)
 
-    if not args.do_train and not args.do_predict:
-        raise ValueError("At least one of `do_train` or `do_predict` must be True.")
+    #if not args.do_train and not args.do_predict:
+    #    raise ValueError("At least one of `do_train` or `do_predict` must be True.")
 
     if args.do_train:
         if not args.train_file:
@@ -813,8 +818,11 @@ def main():
             len(train_examples) / args.train_batch_size / args.gradient_accumulation_steps * args.num_train_epochs)
 
     # Prepare model
-    model = BertForQuestionAnswering.from_pretrained(args.bert_model,
-                cache_dir=PYTORCH_PRETRAINED_BERT_CACHE / 'distributed_{}'.format(args.local_rank))
+    if args.local_rank == -1:
+        cache_dir = PYTORCH_PRETRAINED_BERT_CACHE
+    else:
+        cache_dir=PYTORCH_PRETRAINED_BERT_CACHE / 'distributed_{}'.format(args.local_rank)
+    model = BertForQuestionAnswering.from_pretrained(args.bert_model, cache_dir=cache_dir)
     if args.load_checkpoint is not None:
         model.load_state_dict(torch.load(args.load_checkpoint, map_location='cpu'))
     elif args.init_checkpoint is not None:
@@ -920,9 +928,6 @@ def main():
                     optimizer.step()
                     optimizer.zero_grad()
                     global_step += 1
-                if (global_step + 1) % args.save_checkpoints_steps == 0:
-                    torch.save(model.state_dict(), os.path.join(
-                        args.output_dir, 'model_iter_%d.pth' % (global_step + 1)))
         final_filename = 'model_iter_%d.pth' % (global_step + 1)
         torch.save(model.state_dict(), os.path.join(args.output_dir, final_filename))
         os.symlink(final_filename, os.path.join(args.output_dir, 'model_final.pth'))
@@ -976,7 +981,99 @@ def main():
                           args.n_best_size, args.max_answer_length,
                           args.do_lower_case, output_prediction_file,
                           output_nbest_file, args.verbose_logging)
+    if args.run_server:
+        ROOT_DIR = os.path.dirname(os.path.abspath(__file__))
+        SERVER_ID = '<server_id>'
+        sys.path.insert(0, ROOT_DIR)
+        from morse import Morse
+        model.eval()
+        def query_func(paragraph, question, beam_size):
+            data_obj = {
+                'data': [{
+                    'paragraphs': [{
+                        'context': paragraph, 
+                        'qas': [{'question': question, 'id': SERVER_ID}]
+                    }]
+                }]
+            }
+            with tempfile.NamedTemporaryFile('w', suffix='.json') as data_f:
+                data_f.write(json.dumps(data_obj))
+                data_f.flush()
+                query_examples = read_squad_examples(
+                    input_file=data_f.name, is_training=False)
+            query_features = convert_examples_to_features(
+                examples=query_examples,
+                tokenizer=tokenizer,
+                max_seq_length=args.max_seq_length,
+                doc_stride=args.doc_stride,
+                max_query_length=args.max_query_length,
+                is_training=False)
+            input_ids = torch.tensor([f.input_ids for f in query_features], dtype=torch.long).to(device)
+            input_mask = torch.tensor([f.input_mask for f in query_features], dtype=torch.long).to(device)
+            segment_ids = torch.tensor([f.segment_ids for f in query_features], dtype=torch.long).to(device)
+            #with torch.no_grad():
+            #    batch_start_logits, batch_end_logits = model(input_ids, segment_ids, input_mask)
+            with torch.enable_grad():
+              batch_start_logits, batch_end_logits = model(input_ids, segment_ids, input_mask)
+              # Backprop through the log-probability of the highest-scoring prediction
+              # Take a max over the different slices of the paragraph, if appropriate
+              # NOTE: this is slightly different from the decoding procedure in write_predictions,
+              # which sums the logits and then normalizes via softmax at the end.
+              # However, this does match the training procedure, which has a separate
+              # cross-entropy term for the start and end pointers.
+              logsoftmax_fn = torch.nn.LogSoftmax(dim=1)
+              batch_start_log_probs = logsoftmax_fn(batch_start_logits)
+              batch_end_log_probs = logsoftmax_fn(batch_end_logits)
+              batch_max_log_probs = (torch.max(batch_start_log_probs, 1)[0]
+                                     + torch.max(batch_end_log_probs, 1)[0])
+              max_log_prob, batch_ind = torch.max(batch_max_log_probs, 0)
+              max_log_prob.backward()
+              full_emb_grad = model.bert.embeddings.word_embeddings.weight.grad
+              emb_grads = torch.index_select(full_emb_grad, 0, input_ids[batch_ind,:])  # L, d
+              emb_grad_norms = torch.norm(emb_grads, p=2, dim=1)  # L
+              seen_toks = set()
+              grad_norms = []
+              for tok, grad_norm in zip(query_features[batch_ind].tokens, emb_grad_norms):
+                if tok not in seen_toks:
+                  seen_toks.add(tok)
+                  grad_norms.append({'token': tok, 'grad_norm': grad_norm})
+              grad_norms.sort(key=lambda x: -x['grad_norm'])
+              model.zero_grad()
 
+            all_results = []
+            for i in range(len(query_features)):
+                start_logits = batch_start_logits[i].detach().cpu().tolist()
+                end_logits = batch_end_logits[i].detach().cpu().tolist()
+                query_feature = query_features[i]
+                unique_id = int(query_feature.unique_id)
+                all_results.append(RawResult(unique_id=unique_id,
+                                             start_logits=start_logits,
+                                             end_logits=end_logits))
+            with tempfile.NamedTemporaryFile('r+', suffix='.json') as nbest_f:
+                with tempfile.NamedTemporaryFile('w', suffix='.json') as pred_f:
+                    write_predictions(query_examples, query_features, all_results,
+                                      max(args.n_best_size, beam_size), args.max_answer_length,
+                                      args.do_lower_case, pred_f.name,
+                                      nbest_f.name, args.verbose_logging)
+                nbest_f.seek(0)
+                nbest_list = json.loads(nbest_f.read())[SERVER_ID][:beam_size]
+            return {'beam': nbest_list, 'grad_norms': grad_norms}
+        app = Morse(query_func, args.server_config_file)
+        app.serve(port=args.server_port)
+    if args.test_gradients:
+      from custom_squad import run_test_gradients
+      eval_examples = read_squad_examples(
+          input_file=args.predict_file, is_training=False)
+      random.shuffle(eval_examples)
+      eval_examples = eval_examples[:1000]
+      eval_features = convert_examples_to_features(
+          examples=eval_examples,
+          tokenizer=tokenizer,
+          max_seq_length=args.max_seq_length,
+          doc_stride=args.doc_stride,
+          max_query_length=args.max_query_length,
+          is_training=False)
+      run_test_gradients(model, bert_config, eval_examples, eval_features, device)
 
 if __name__ == "__main__":
     main()

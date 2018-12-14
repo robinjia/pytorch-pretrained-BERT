@@ -1,0 +1,39 @@
+title: BERT SQuAD v1.1 demo server
+inputs:
+  - name: paragraph
+    display: Paragraph
+    type: textarea
+    default: Super Bowl 50 was an American football game to determine the champion of the National Football League (NFL) for the 2015 season. The American Football Conference (AFC) champions Denver Broncos defeated the National Football Conference (NFC) champions Carolina Panthers, 24–10.
+    bootstrap-cols: 12
+    rows: 6
+  - name: question
+    display: Question
+    type: string
+    default: Who won Super Bowl 50?
+    bootstrap-cols: 9
+  - name: beam_size
+    display: Beam size
+    type: integer
+    default: 10
+    bootstrap-cols: 3
+outputs:
+  - name: beam
+    display: "Model predictions:"
+    type: list
+    fields:
+      - name: text
+        display: Answer
+        type: string
+      - name: probability
+        display: Probability
+        type: float
+  - name: grad_norms
+    display: "Gradient L2 Norms"
+    type: list
+    fields:
+      - name: token
+        display: Token
+        type: string
+      - name: grad_norm
+        display: Gradient L2 norm
+        type: float
