@@ -775,6 +775,8 @@ def main():
                         help="The output directory where the model checkpoints and predictions will be written.")
 
     ## Other parameters
+    parser.add_argument("--load_dir", default=None, type=str, 
+                        help="Where to load checkpoint from during prediction")
     parser.add_argument("--train_file", default=None, type=str, help="SQuAD json for training. E.g., train-v1.1.json")
     parser.add_argument("--predict_file", default=None, type=str,
                         help="SQuAD json for predictions. E.g., dev-v1.1.json or test-v1.1.json")
@@ -890,8 +892,11 @@ def main():
             len(train_examples) / args.train_batch_size / args.gradient_accumulation_steps * args.num_train_epochs)
 
     # Prepare model
-    model = BertForQuestionAnswering.from_pretrained(args.bert_model,
-                cache_dir=PYTORCH_PRETRAINED_BERT_CACHE / 'distributed_{}'.format(args.local_rank))
+    if args.local_rank == -1:
+        cache_dir = PYTORCH_PRETRAINED_BERT_CACHE
+    else:
+        cache_dir=PYTORCH_PRETRAINED_BERT_CACHE / 'distributed_{}'.format(args.local_rank)
+    model = BertForQuestionAnswering.from_pretrained(args.bert_model, cache_dir=cache_dir)
 
     if args.fp16:
         model.half()
@@ -1014,6 +1019,8 @@ def main():
         torch.save(model_to_save.state_dict(), output_model_file)
 
     # Load a trained model that you have fine-tuned
+    if args.load_dir:
+        output_model_file = os.path.join(args.load_dir, "pytorch_model.bin")
     model_state_dict = torch.load(output_model_file)
     model = BertForQuestionAnswering.from_pretrained(args.bert_model, state_dict=model_state_dict)
     model.to(device)
