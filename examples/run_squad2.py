@@ -120,7 +120,8 @@ def read_squad_examples(input_file, is_training):
     with open(input_file, "r", encoding='utf-8') as reader:
         source = json.load(reader)
         input_data = source["data"]
-        version = source["version"]
+        #version = source["version"]
+        version = 'v2.0'
 
     def is_whitespace(c):
         if c == " " or c == "\t" or c == "\r" or c == "\n" or ord(c) == 0x202F:
@@ -156,6 +157,7 @@ def read_squad_examples(input_file, is_training):
                     if version == "v2.0":
                         is_impossible = qa["is_impossible"]
                     if (len(qa["answers"]) != 1) and (not is_impossible):
+                        print(qa)
                         raise ValueError(
                             "For training, each question should have exactly 1 answer.")
                     if not is_impossible:
